@@ -1,0 +1,10 @@
+bitsandbytes
+datasets
+dotenv
+fsspec
+huggingface_hub
+numpy
+safetensors
+sentencepiece
+torch
+transformers

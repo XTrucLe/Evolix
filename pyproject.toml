@@ -1,0 +1,15 @@
+[project]
+name = "evolix"
+version = "0.1.0"
+
+[project.scripts]
+evolix = "evolix.cli:main"
+
+[tool.ruff]
+line-length = 256
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.ruff.lint]
+ignore = ['E731', 'E401', 'F403']
