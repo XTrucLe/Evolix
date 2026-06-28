@@ -11,60 +11,54 @@ def _rms_norm_kernel(
     Out_ptr,
     stride_x_row,
     stride_out_row,
-    BT,
     R,
     eps,
     BLOCK_R: tl.constexpr,
 ):
     row = tl.program_id(0)
-    if row >= BT:
-        return
 
-    r_offs = tl.arange(0, BLOCK_R)
-    r_mask = r_offs < R
+    offs = tl.arange(0, BLOCK_R)
+    mask = offs < R
 
-    x_ptr = X_ptr + row * stride_x_row + r_offs
-    out_ptr = Out_ptr + row * stride_out_row + r_offs
+    x_ptr = X_ptr + row * stride_x_row + offs
+    w_ptr = WN_ptr + offs
+    out_ptr = Out_ptr + row * stride_out_row + offs
 
-    x = tl.load(x_ptr, mask=r_mask, other=0.0)
-    wn = tl.load(WN_ptr + r_offs, mask=r_mask, other=1.0)
+    x = tl.load(x_ptr, mask=mask, other=0.0).to(tl.float32)
 
-    x_squared_masked = tl.where(r_mask, x * x, 0.0)
-    sq_mean = tl.sum(x_squared_masked, axis=0) / R
+    x2 = x * x
+    mean = tl.sum(x2 * mask, axis=0) / R
+    inv_rms = tl.math.rsqrt(mean + eps)
 
-    rms = tl.math.rsqrt(sq_mean + eps)
+    w = tl.load(w_ptr, mask=mask, other=1.0).to(tl.float32)
 
-    out = x * rms * wn
-    tl.store(out_ptr, out, mask=r_mask)
+    out = x * inv_rms * w
+
+    tl.store(out_ptr, out, mask=mask)
 
 
-def fused_kv_down_rms(
-    x: torch.Tensor,
-    w_down: torch.Tensor,
-    w_norm: torch.Tensor,
-    eps: float = 1e-6,
-) -> torch.Tensor:
+def fused_kv_down_rms(x, w_down, w_norm, eps=1e-6):
     B, T, C = x.shape
     R = w_down.shape[0]
     BT = B * T
 
     x_flat = x.reshape(BT, C)
-    gemm_out = F.linear(x_flat, w_down).to(torch.float32)
 
-    out = torch.empty(BT, R, device=x.device, dtype=x.dtype)
-    BLOCK_R = min(triton.next_power_of_2(R), 1024)
+    gemm_out = F.linear(x_flat, w_down).contiguous().to(torch.float32)
+    out = torch.empty((BT, R), device=x.device, dtype=torch.float32)
+    BLOCK_R = triton.next_power_of_2(min(R, 1024))
 
     _rms_norm_kernel[(BT,)](
         gemm_out,
-        w_norm.to(torch.float32),
+        w_norm,
         out,
         gemm_out.stride(0),
         out.stride(0),
-        BT,
         R,
         eps,
         BLOCK_R=BLOCK_R,
-        num_warps=8,
-        num_stages=4,
+        num_warps=4,
+        num_stages=2,
     )
-    return out.view(B, T, R)
+
+    return out.view(B, T, R).to(x.dtype)
