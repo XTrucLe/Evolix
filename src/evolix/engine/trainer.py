@@ -1,14 +1,12 @@
 from math import dist
 from typing import Type
-
 import torch
 import bitsandbytes as bnb
 
 from evolix.config import Config
 from evolix.models.architecture import Evolix
-from evolix.utils.system import SM, SDPA_BACKEND
+from evolix.utils.system import SM
 from evolix.utils.logger import task_queue
-
 from evolix.engine.distributed import setup_distributed, wrap_ddp, cleanup_distributed
 from evolix.engine.lr_scheduler import get_lr
 
@@ -58,10 +56,9 @@ class Trainer:
 
         if hasattr(torch.backends.cuda, "enable_cudnn_sdp"):
             if SM >= 90:
-                torch.backends.cuda.enable_flash_sdp(False)
+                torch.backends.cuda.enable_flash_sdp(True)
                 torch.backends.cuda.enable_cudnn_sdp(True)
                 torch.backends.cuda.enable_mem_efficient_sdp(False)
-                torch.backends.cudnn.enabled = True
             else:
                 torch.backends.cuda.enable_flash_sdp(True)
                 torch.backends.cuda.enable_cudnn_sdp(False)
@@ -69,10 +66,8 @@ class Trainer:
         else:
             torch.backends.cuda.enable_flash_sdp(True)
             torch.backends.cuda.enable_mem_efficient_sdp(True)
-            torch.backends.cudnn.enabled = True
 
     def _print_config_info(self, master_process, model, device, scaler, tokens_per_step, ddp, world_size, step, start_step):
-        """In thông tin cấu hình hệ thống một cách trực quan."""
         if not master_process:
             return
         print("─" * 80)
@@ -111,7 +106,7 @@ class Trainer:
                 print("Compiling model via Inductor...")
             torch._inductor.config.triton.cudagraphs = False
             torch._inductor.config.coordinate_descent_tuning = True
-            model = torch.compile(model, mode="reduce-overhead", fullgraph=True, dynamic=True)
+            model = torch.compile(model, mode="max-autotune")
 
         model = wrap_ddp(model, ddp, local_rank)
         if ddp:
@@ -181,7 +176,6 @@ class Trainer:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), self.cfg.max_grad_norm)
                 optimizer.step()
 
-            # --- Ghi Log ---
             if do_log and master_process:
                 if is_cuda:
                     t1.record()
@@ -199,7 +193,6 @@ class Trainer:
 
             if do_save and master_process:
                 self.checkpoint_manager.save(raw_model, optimizer, scaler, step, accum_loss_val, world_size)
-
             step += 1
 
         if master_process:

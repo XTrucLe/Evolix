@@ -2,16 +2,11 @@ import math
 
 
 def get_lr(step: int, cfg):
-    warmup = cfg.warmup_steps
-    total = cfg.total_steps
-    base_lr = cfg.lr
-    min_lr = cfg.min_lr
+    w, t = cfg.warmup_steps, max(cfg.total_steps, cfg.warmup_steps + 1)
+    base, min_lr = cfg.lr, cfg.min_lr
 
-    if step < warmup:
-        return base_lr * (step + 1) / warmup
+    if step < w:
+        return base * (step + 1) / w if w else base
 
-    progress = (step - warmup) / (total - warmup)
-    progress = min(max(progress, 0.0), 1.0)
-
-    cosine = 0.5 * (1 + math.cos(math.pi * progress))
-    return max(base_lr * cosine, min_lr)
+    p = min(max((step - w) / (t - w), 0.0), 1.0)
+    return max(base * 0.5 * (1 + math.cos(math.pi * p)), min_lr)

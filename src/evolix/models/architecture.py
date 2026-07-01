@@ -63,7 +63,7 @@ class Evolix(nn.Module):
 
         for i, block in enumerate(self.blocks):
             if self.use_gc and self.training:
-                h = checkpoint(block.forward, h, False, offset, None, use_reentrant=False)[0]
+                h = checkpoint(block.forward, h, offset, None, use_reentrant=False)[0]
             else:
                 past_cache = kv_caches[i] if (kv_caches is not None) else None
 

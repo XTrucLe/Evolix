@@ -8,9 +8,9 @@ class Config:
     vocab_size: int = 36864
     spm_prefix: str = "evolix"
     block_size: int = 8192
-    layers: int = 36
-    heads: int = 24
-    dim: int = 1536
+    layers: int = 32
+    heads: int = 20
+    dim: int = 2560
     lora_rank: int = 512
     rope_dim: int = 64
     dropout: float = 0.0
@@ -19,7 +19,7 @@ class Config:
     compile: bool = False
     # --- DATA & TRAINING SYSTEM ---
     data_split: str = "train"
-    batch_size: int = 16
+    batch_size: int = 2
     grad_accum: int = 16
     dtype: str = "bfloat16"
     num_workers: int = 8
@@ -31,12 +31,12 @@ class Config:
     resume: bool = False
     short_run: bool = False
     short_run_steps: int = 50
-    save_every: int = 100
+    save_every: int = 1000
     log_every: int = 10
     seed: int = 55
     # --- OPTIMIZER & SCHEDULER ---
-    total_steps: int = 50_000
-    warmup_steps: int = 100
+    total_steps: int = 9_000
+    warmup_steps: int = 200
     lr: float = 3e-4
     min_lr: float = 1e-5
     betas: Tuple[float, float] = (0.9, 0.95)

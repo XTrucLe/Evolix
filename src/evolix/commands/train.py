@@ -6,15 +6,18 @@ from evolix.utils.checkpoint import CheckpointManager
 
 
 def trainer():
-    config = Config()
-    config.hf_token = os.environ.get("HF_TOKEN", None) if not config.hf_token else config.hf_token
-    if not config.hf_token:
-        raise ValueError("Hugging Face token is not set. Please set the 'hf_token' in the configuration.")
+    try:
+        config = Config()
+        config.hf_token = os.environ.get("HF_TOKEN", None) if not config.hf_token else config.hf_token
+        if not config.hf_token:
+            raise ValueError("Hugging Face token is not set. Please set the 'hf_token' in the configuration.")
 
-    data_manager = DataManager(config)
-    checkpoint_manager = CheckpointManager(config)
-    trainer = Trainer(config, data_manager, checkpoint_manager)
-    trainer.run()
+        data_manager = DataManager(config)
+        checkpoint_manager = CheckpointManager(config)
+        trainer = Trainer(config, data_manager, checkpoint_manager)
+        trainer.run()
+    except Exception as e:
+        print(f"Error: {e}")
 
 
 if __name__ == "__main__":
