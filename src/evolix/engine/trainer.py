@@ -1,6 +1,6 @@
-from math import dist
 from typing import Type
 import torch
+from torch.distributed import dist
 import bitsandbytes as bnb
 
 from evolix.config import Config
@@ -93,8 +93,9 @@ class Trainer:
 
         amp_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}.get(self.cfg.dtype, torch.float32)
         scaler = torch.amp.GradScaler(enabled=(is_cuda and self.cfg.dtype == "float16"))
+        model_dtype = torch.bfloat16 if self.cfg.dtype == "bfloat16" else torch.float32
 
-        model = self._build_model().to(device, dtype=amp_dtype)
+        model = self._build_model().to(device, dtype=model_dtype)
         optimizer = self._build_optimizer(model)
 
         loader = self.data_manager.build_loader()
@@ -150,9 +151,11 @@ class Trainer:
                     x, y = next(data_iter)
 
                 x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-                loss = model(x, y)
 
-                scaled_loss = loss / self.cfg.grad_accum
+                with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=is_cuda):
+                    loss = model(x, y)
+                    scaled_loss = loss / self.cfg.grad_accum
+
                 if scaler.is_enabled():
                     scaler.scale(scaled_loss).backward()
                 else:
