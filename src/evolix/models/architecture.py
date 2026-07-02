@@ -35,7 +35,7 @@ class Evolix(nn.Module):
     def _init_weights_all(self, layers: int):
         self.apply(self._init_module)
         for name, p in self.named_parameters():
-            if name.endswith("proj.weight") or name.endswith("w3.weight"):
+            if name.endswith("proj.weight") or name.endswith("w2.weight"):
                 nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * layers))
 
     @staticmethod
@@ -79,11 +79,7 @@ class Evolix(nn.Module):
 
         assert y.shape == (B, T)
 
-        logits_flat = logits.view(-1, logits.size(-1)).to(torch.float32)
-        y_flat = y.view(-1)
-
-        loss = F.cross_entropy(logits_flat, y_flat)
-        return loss
+        return F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
 
     def num_params(self) -> str:
         fmt = lambda n: f"{n / 1e9:.2f}B" if n >= 1e9 else f"{n / 1e6:.2f}M"

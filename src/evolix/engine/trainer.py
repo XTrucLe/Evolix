@@ -1,6 +1,6 @@
 from typing import Type
 import torch
-from torch.distributed import dist
+import torch.distributed as dist
 import bitsandbytes as bnb
 
 from evolix.config import Config
@@ -105,7 +105,6 @@ class Trainer:
         if self.cfg.compile and hasattr(torch, "compile"):
             if master_process:
                 print("Compiling model via Inductor...")
-            torch._inductor.config.triton.cudagraphs = False
             torch._inductor.config.coordinate_descent_tuning = True
             model = torch.compile(model, mode="max-autotune")
 
@@ -127,6 +126,7 @@ class Trainer:
         self._print_config_info(master_process, raw_model, device, scaler, tokens_per_step, ddp, world_size, step, start_step)
 
         while step < self.cfg.total_steps:
+            torch.compiler.cudagraph_mark_step_begin()
             lr = get_lr(step, self.cfg)
             for pg in optimizer.param_groups:
                 pg["lr"] = lr
@@ -151,7 +151,6 @@ class Trainer:
                     x, y = next(data_iter)
 
                 x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-
                 with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=is_cuda):
                     loss = model(x, y)
                     scaled_loss = loss / self.cfg.grad_accum
@@ -160,7 +159,6 @@ class Trainer:
                     scaler.scale(scaled_loss).backward()
                 else:
                     scaled_loss.backward()
-
                 accum_loss_tensor.add_(scaled_loss.detach())
 
             if ddp:
@@ -172,21 +170,22 @@ class Trainer:
 
             if scaler.is_enabled():
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), self.cfg.max_grad_norm)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), self.cfg.max_grad_norm)
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), self.cfg.max_grad_norm)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), self.cfg.max_grad_norm)
                 optimizer.step()
 
             if do_log and master_process:
+                grad_norm_val = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
                 if is_cuda:
                     t1.record()
                     torch.cuda.synchronize()
                     ms = t0.elapsed_time(t1)
-                    msg = f"step {step:7d} | loss {accum_loss_val:8.5f} | lr {lr:9.2e} | {tokens_per_step / ms:8.2f}k tok/s | {ms:7.0f}ms"
+                    msg = f"step {step:7d} | loss {accum_loss_val:8.5f} | gnorm {grad_norm_val:6.2f} | lr {lr:9.2e} | {tokens_per_step / ms:8.2f}k tok/s | {ms:7.0f}ms"
                 else:
-                    msg = f"step {step:7d} | loss {accum_loss_val:8.5f} | lr {lr:9.2e}"
+                    msg = f"step {step:7d} | loss {accum_loss_val:8.5f} | gnorm {grad_norm_val:6.2f} | lr {lr:9.2e}"
                 task_queue.put({"type": "log", "data": msg})
 
             if self.cfg.short_run and step >= start_step + self.cfg.short_run_steps:
@@ -196,6 +195,7 @@ class Trainer:
 
             if do_save and master_process:
                 self.checkpoint_manager.save(raw_model, optimizer, scaler, step, accum_loss_val, world_size)
+
             step += 1
 
         if master_process:

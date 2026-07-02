@@ -15,8 +15,8 @@ class Config:
     rope_dim: int = 64
     dropout: float = 0.0
     bias: bool = False
-    grad_checkpoint: bool = True
-    compile: bool = False
+    grad_checkpoint: bool = False
+    compile: bool = True
     # --- DATA & TRAINING SYSTEM ---
     data_split: str = "train"
     batch_size: int = 2
@@ -35,7 +35,7 @@ class Config:
     log_every: int = 10
     seed: int = 55
     # --- OPTIMIZER & SCHEDULER ---
-    total_steps: int = 9_000
+    total_steps: int = 10_000
     warmup_steps: int = 200
     lr: float = 3e-4
     min_lr: float = 1e-5
