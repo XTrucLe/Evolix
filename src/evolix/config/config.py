@@ -8,9 +8,9 @@ class Config:
     vocab_size: int = 36864
     spm_prefix: str = "evolix"
     block_size: int = 8192
-    layers: int = 32
-    heads: int = 20
-    dim: int = 2560
+    layers: int = 24
+    heads: int = 22
+    dim: int = 2816
     lora_rank: int = 512
     rope_dim: int = 64
     dropout: float = 0.0
@@ -42,6 +42,7 @@ class Config:
     betas: Tuple[float, float] = (0.9, 0.95)
     weight_decay: float = 0.1
     max_grad_norm: float = 1.0
+    optimizer: str = "adamw"  # "adamw", "8bit", "auto"
     # --- HUGGINGFACE HUB ---
     hf_dataset_repo: str = "trucle5503/dataset_pretrain"
     hf_repo_id: str = "trucle5503/Evolix"

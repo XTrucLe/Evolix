@@ -88,7 +88,7 @@ class CheckpointManager:
         except Exception as e:
             print(f"❌ [HF Backup] Failed to trigger upload: {e}")
 
-    def load(self, model, optimizer, scaler, dataset=None, ddp_world_size=1) -> int:
+    def load(self, model, optimizer=None, scaler=None, dataset=None, ddp_world_size=1) -> int:
         from huggingface_hub import hf_hub_download
 
         print(f"[hf_ckpt] Checking for the latest checkpoint on Hugging Face Hub ({self.repo_id})...")
@@ -106,7 +106,8 @@ class CheckpointManager:
         raw_model.load_state_dict(state)
 
         ckpt = torch.load(training_state_path, map_location="cpu", weights_only=True)
-        optimizer.load_state_dict(ckpt["optimizer"])
+        if optimizer:
+            optimizer.load_state_dict(ckpt["optimizer"])
 
         if ckpt.get("scaler") and len(ckpt["scaler"]) > 0:
             if hasattr(scaler, "is_enabled") and scaler.is_enabled():

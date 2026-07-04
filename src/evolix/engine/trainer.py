@@ -4,145 +4,88 @@ import torch.distributed as dist
 import bitsandbytes as bnb
 
 from evolix.config import Config
-from evolix.models.architecture import Evolix
-from evolix.utils.system import SM
+from evolix.engine.base import EngineBase
 from evolix.utils.logger import task_queue
-from evolix.engine.distributed import setup_distributed, wrap_ddp, cleanup_distributed
+from evolix.engine.distributed import wrap_ddp, cleanup_distributed
 from evolix.engine.lr_scheduler import get_lr
 
 
-class Trainer:
-    def __init__(self, cfg: Type[Config], data_manager, checkpoint_manager):
-        self.cfg = cfg
+class Trainer(EngineBase):
+    def __init__(self, config: Type[Config], data_manager, checkpoint_manager):
+        super().__init__(config)
         self.data_manager = data_manager
         self.checkpoint_manager = checkpoint_manager
 
-    def _build_model(self) -> Evolix:
-        return Evolix(
-            vocab_size=self.cfg.vocab_size,
-            dim=self.cfg.dim,
-            lora_rank=self.cfg.lora_rank,
-            layers=self.cfg.layers,
-            heads=self.cfg.heads,
-            block_size=self.cfg.block_size,
-            dropout=self.cfg.dropout,
-            grad_checkpoint=self.cfg.grad_checkpoint,
-            rope_dim=self.cfg.rope_dim,
-        )
+    def _load_init_weights(self, model, optimizer, scaler, dataset, ddp_world_size) -> int:
+        return self.checkpoint_manager.load(model, optimizer, scaler, dataset, ddp_world_size) + 1 if self.config.resume else 0
 
-    def _build_optimizer(self, model: Evolix) -> bnb.optim.AdamW8bit:
-        decay, no_decay = [], []
-        for name, p in model.named_parameters():
-            if not p.requires_grad:
-                continue
-            is_no_decay = p.ndim < 2 or "bias" in name or "norm" in name
-            (no_decay if is_no_decay else decay).append(p)
-        return bnb.optim.AdamW8bit(
-            [
-                {"params": decay, "weight_decay": self.cfg.weight_decay},
-                {"params": no_decay, "weight_decay": 0.0},
-            ],
-            lr=self.cfg.lr,
-            betas=(0.9, 0.95),
-        )
-
-    def _configure_optimization_backends(self, device):
-        if device.type != "cuda":
-            return
-
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cudnn.benchmark = True
-
-        if hasattr(torch.backends.cuda, "enable_cudnn_sdp"):
-            if SM >= 90:
-                torch.backends.cuda.enable_flash_sdp(True)
-                torch.backends.cuda.enable_cudnn_sdp(True)
-                torch.backends.cuda.enable_mem_efficient_sdp(False)
-            else:
-                torch.backends.cuda.enable_flash_sdp(True)
-                torch.backends.cuda.enable_cudnn_sdp(False)
-                torch.backends.cuda.enable_mem_efficient_sdp(True)
-        else:
-            torch.backends.cuda.enable_flash_sdp(True)
-            torch.backends.cuda.enable_mem_efficient_sdp(True)
-
-    def _print_config_info(self, master_process, model, device, scaler, tokens_per_step, ddp, world_size, step, start_step):
+    def _log_config(self, master_process, model, device, scaler, tokens_per_step, ddp, world_size, step, start_step):
         if not master_process:
             return
         print("─" * 80)
         print("🚀 MODEL CONFIG :")
-        print(f"   • Architecture: Dim = {self.cfg.dim} | Layers = {self.cfg.layers} | Heads = {self.cfg.heads}")
-        print(f"   • Context Len : {self.cfg.block_size} tokens")
+        print(f"   • Architecture: Dim = {self.config.dim} | Layers = {self.config.layers} | Heads = {self.config.heads}")
+        print(f"   • Context Len : {self.config.block_size} tokens")
         print(f"   • Total Params: {model.num_params() if hasattr(model, 'num_params') else 'N/A'}")
-        print(f"   • Gradient Checkpt: {'Enabled' if self.cfg.grad_checkpoint else 'Disabled'}")
+        print(f"   • Gradient Checkpt: {'Enabled' if self.config.grad_checkpoint else 'Disabled'}")
         print("\n⚙️ TRAINING CONFIG:")
         print(f"   • Device/GPU  : {torch.cuda.get_device_name(device) if device.type == 'cuda' else 'CPU'}")
-        print(f"   • Precision   : {self.cfg.dtype.upper()} {'(Gradient Scaler Enabled)' if scaler.is_enabled() else ''}")
-        print(f"   • Total Batch : {tokens_per_step:,} tokens/step (Accum: {self.cfg.grad_accum})")
+        print(f"   • Precision   : {self.config.dtype.upper()} {'(Gradient Scaler Enabled)' if scaler.is_enabled() else ''}")
+        print(f"   • Total Batch : {tokens_per_step:,} tokens/step (Accum: {self.config.grad_accum})")
         print(f"   • DDP Mode    : {'Active' if ddp else 'Disabled'} ({world_size} GPU{'' if world_size == 1 else 's'})")
-        steps_info = f"{step:,} → {start_step + self.cfg.short_run_steps:,} [SHORT RUN]" if self.cfg.short_run else f"{step:,} → {self.cfg.total_steps:,}"
+        steps_info = f"{step:,} → {start_step + self.config.short_run_steps:,} [SHORT RUN]" if self.config.short_run else f"{step:,} → {self.config.total_steps:,}"
         print(f"   • Total Steps : {steps_info}")
         print("─" * 80 + "\n")
 
     def run(self):
-        device, ddp, world_size, master_process, local_rank = setup_distributed(self.cfg.seed)
+        device, ddp, world_size, master_process, local_rank = self.setup()
         is_cuda = device.type == "cuda"
 
-        self._configure_optimization_backends(device)
+        amp_dtype = torch.float16 if self.config.dtype == "float16" else torch.bfloat16 if self.config.dtype == "bfloat16" else torch.float32
+        scaler = torch.amp.GradScaler(enabled=is_cuda and self.config.dtype == "float16")
+        model_type = torch.float32 if self.config.dtype == "float32" else amp_dtype
 
-        amp_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}.get(self.cfg.dtype, torch.float32)
-        scaler = torch.amp.GradScaler(enabled=(is_cuda and self.cfg.dtype == "float16"))
-        model_dtype = torch.bfloat16 if self.cfg.dtype == "bfloat16" else torch.float32
-
-        model = self._build_model().to(device, dtype=model_dtype)
-        optimizer = self._build_optimizer(model)
-
+        model = self.build_model().to(device, dtype=model_type)
+        optimizer = self.build_optimizer(model)
         loader = self.data_manager.build_loader()
-        start_step = step = self.checkpoint_manager.load(model=model, optimizer=optimizer, scaler=scaler, dataset=loader.dataset, ddp_world_size=world_size) + 1 if self.cfg.resume else 0
-        raw_model = model
-
-        if self.cfg.compile and hasattr(torch, "compile"):
-            if master_process:
-                print("Compiling model via Inductor...")
-            torch._inductor.config.coordinate_descent_tuning = True
-            model = torch.compile(model, mode="max-autotune")
-
+        start_step = step = self._load_init_weights(model, optimizer, scaler, loader.dataset, world_size)
+        if master_process:
+            print("Compiling model via Inductor..." if self.config.compile else "Compile disabled.")
+        model = self.maybe_compile(model)
         model = wrap_ddp(model, ddp, local_rank)
-        if ddp:
-            raw_model = model.module
+        raw_model = model.module if ddp else model
 
         data_iter = iter(loader)
         model.train()
 
-        t0, t1 = None, None
-        if is_cuda:
+        t0, t1 = None, None  # type: ignore
+        if master_process:
             t0, t1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
 
-        tokens_per_step = self.cfg.batch_size * self.cfg.block_size * self.cfg.grad_accum * world_size
+        tokens_per_step = self.config.batch_size * self.config.block_size * self.config.grad_accum
         accum_loss_tensor = torch.zeros(1, device=device)
         loss_tensor = torch.zeros(1, device=device) if ddp else None
+        accum_loss_val = 0.0
 
-        self._print_config_info(master_process, raw_model, device, scaler, tokens_per_step, ddp, world_size, step, start_step)
+        self._log_config(master_process, raw_model, device, scaler, tokens_per_step, ddp, world_size, start_step, start_step)
 
-        while step < self.cfg.total_steps:
+        while step < self.config.total_steps:
             torch.compiler.cudagraph_mark_step_begin()
-            lr = get_lr(step, self.cfg)
+            lr = get_lr(step, self.config)
             for pg in optimizer.param_groups:
                 pg["lr"] = lr
 
-            do_log = step % self.cfg.log_every == 0
-            do_save = step > 0 and step % self.cfg.save_every == 0
-
+            do_log = step % self.config.log_every == 0
+            do_save = step > 0 and step % self.config.save_every == 0
             optimizer.zero_grad(set_to_none=True)
             accum_loss_tensor.zero_()
 
             if is_cuda and do_log and master_process:
                 t0.record()
 
-            for _ in range(self.cfg.grad_accum):
+            for micro_step in range(self.config.grad_accum):
                 if ddp:
-                    model.require_backward_grad_sync = _ == self.cfg.grad_accum - 1
+                    model.require_backward_grad_sync = micro_step == self.config.grad_accum - 1
 
                 try:
                     x, y = next(data_iter)
@@ -153,7 +96,7 @@ class Trainer:
                 x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
                 with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=is_cuda):
                     loss = model(x, y)
-                    scaled_loss = loss / self.cfg.grad_accum
+                    scaled_loss = loss / self.config.grad_accum
 
                 if scaler.is_enabled():
                     scaler.scale(scaled_loss).backward()
@@ -170,11 +113,11 @@ class Trainer:
 
             if scaler.is_enabled():
                 scaler.unscale_(optimizer)
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), self.cfg.max_grad_norm)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), self.config.max_grad_norm)
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), self.cfg.max_grad_norm)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), self.config.max_grad_norm)
                 optimizer.step()
 
             if do_log and master_process:
@@ -188,9 +131,9 @@ class Trainer:
                     msg = f"step {step:7d} | loss {accum_loss_val:8.5f} | gnorm {grad_norm_val:6.2f} | lr {lr:9.2e}"
                 task_queue.put({"type": "log", "data": msg})
 
-            if self.cfg.short_run and step >= start_step + self.cfg.short_run_steps:
+            if self.config.short_run and step >= start_step + self.config.short_run_steps:
                 if master_process:
-                    print(f"Short run complete: ran {self.cfg.short_run_steps} steps starting from step {start_step}.")
+                    print(f"Short run complete: ran {self.config.short_run_steps} steps starting from step {start_step}.")
                 break
 
             if do_save and master_process:

@@ -79,7 +79,7 @@ class Evolix(nn.Module):
 
         assert y.shape == (B, T)
 
-        return F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+        return F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1), ignore_index=-1)
 
     def num_params(self) -> str:
         fmt = lambda n: f"{n / 1e9:.2f}B" if n >= 1e9 else f"{n / 1e6:.2f}M"

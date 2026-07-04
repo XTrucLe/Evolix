@@ -1,36 +1,22 @@
-import os, typer
+import typer
 
-from evolix.commands.train import trainer
-
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:128"
+from evolix.commands import train, finetune, evaluate, infer
 
 app = typer.Typer()
 
+app.add_typer(train.app, name="train")
+app.add_typer(finetune.app, name="finetune")
+app.add_typer(evaluate.app, name="evaluate")
+app.add_typer(infer.app, name="infer")
+
 
 @app.callback(invoke_without_command=True)
-def callback(ctx: typer.Context):
+def default(ctx: typer.Context):
     if ctx.invoked_subcommand is None:
-        train()
-
-
-@app.command()
-def train():
-    trainer()
-
-
-@app.command()
-def evaluate():
-    typer.echo("Evaluating...")
-
-
-@app.command()
-def predict():
-    typer.echo("Predicting...")
-
+        train.trainer()
 
 def main():
     app()
-
 
 if __name__ == "__main__":
     main()

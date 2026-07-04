@@ -152,8 +152,7 @@ class MultiHeadLatentAttention(nn.Module):
 class FeedForward(nn.Module):
     def __init__(self, dim: int, dropout: float = 0.1):
         super().__init__()
-        hidden = int(8 * dim / 3)
-        hidden = (hidden + 63) // 64 * 64
+        hidden = int(8 * dim / 3 + 127) // 128 * 128
         self.w13 = nn.Linear(dim, 2 * hidden, bias=False)
         self.w2 = nn.Linear(hidden, dim, bias=False)
         self.drop = nn.Dropout(dropout)
