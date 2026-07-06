@@ -1,13 +1,11 @@
-import os, typer
+import os
+
 from evolix.config.config import Config
 from evolix.engine.trainer import Trainer
 from evolix.data.dataset import DataManager
 from evolix.utils.checkpoint import CheckpointManager
 
-app = typer.Typer()
 
-
-@app.command()
 def trainer():
     try:
         config = Config()

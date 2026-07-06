@@ -1,4 +1,4 @@
-import os, typer,  dataclasses
+import os, dataclasses
 
 from evolix.config.finetune_config import FinetuneConfig
 from evolix.data.tokenizer import Tokenizer
@@ -6,10 +6,7 @@ from evolix.data.sft_dataset import SFTDataManager
 from evolix.engine.finetune import FinetuneTrainer
 from evolix.utils.checkpoint import CheckpointManager
 
-app = typer.Typer()
 
-
-@app.command()
 def finetune():
     try:
         cfg = FinetuneConfig()
