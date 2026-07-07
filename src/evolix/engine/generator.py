@@ -17,7 +17,7 @@ class Generator(EngineBase):
 
     def load(self) -> "Generator":
         device, *_ = self.setup()
-        model_dtype = torch.bfloat16 if self.config.dtype == "bfloat16" else torch.float32
+        model_dtype = torch.bfloat16 if self.cfg.dtype == "bfloat16" else torch.float32
 
         model = self.build_model().to(device, dtype=model_dtype)
         self.checkpoint_manager.load(model=model, optimizer=None, scaler=None)
@@ -42,9 +42,7 @@ class Generator(EngineBase):
         ids = self.tokenizer.encode(prompt)
         x = torch.tensor([ids], dtype=torch.long, device=device)
 
-        kv_caches = [
-            block.attn.init_cache(1, device, model_dtype) for block in self._model.blocks
-        ]
+        kv_caches = [block.attn.init_cache(1, device, model_dtype) for block in self._model.blocks]
 
         logits, kv_caches = self._model(x, kv_caches=kv_caches, offset=0)
         next_id = sample_next(logits[:, -1], temperature, top_k, top_p)

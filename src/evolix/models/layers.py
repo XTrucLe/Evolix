@@ -1,9 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Type
 
 from torch.nn.attention import sdpa_kernel, SDPBackend
+
+from evolix.config.config import Config
 
 BACKENDS = [SDPBackend.FLASH_ATTENTION, SDPBackend.CUDNN_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]
 
@@ -11,35 +13,31 @@ BACKENDS = [SDPBackend.FLASH_ATTENTION, SDPBackend.CUDNN_ATTENTION, SDPBackend.E
 class MultiHeadLatentAttention(nn.Module):
     def __init__(
         self,
-        dim: int,
-        heads: int,
-        max_seq_len: int = 2048,
-        lora_rank: int = 128,
-        rope_dim: int = 64,
+        cfg: Type[Config],
     ):
         super().__init__()
-        assert dim % heads == 0
+        assert cfg.dim % cfg.heads == 0
 
-        self.dim = dim
-        self.heads = heads
-        self.head_dim = dim // heads
-        self.rope_dim = rope_dim
-        self.nope_dim = self.head_dim - rope_dim
-        self.lora_rank = lora_rank
-        self.max_seq_len = max_seq_len
+        self.dim = cfg.dim
+        self.heads = cfg.heads
+        self.head_dim = cfg.dim // cfg.heads
+        self.rope_dim = cfg.rope_dim
+        self.nope_dim = self.head_dim - cfg.rope_dim
+        self.kv_lora_rank = cfg.kv_lora_rank
+        self.max_seq_len = cfg.block_size
         self.scale = self.head_dim**-0.5
 
-        self.q_nope = nn.Linear(dim, heads * self.nope_dim, bias=False)
-        self.q_rope = nn.Linear(dim, heads * rope_dim, bias=False)
-        self.kv_down = nn.Linear(dim, lora_rank, bias=False)
-        self.kv_norm_w = nn.Parameter(torch.ones(lora_rank))
-        self.kv_up_k_nope = nn.Linear(lora_rank, heads * self.nope_dim, bias=False)
-        self.k_rope = nn.Linear(dim, rope_dim, bias=False)
-        self.kv_up_v = nn.Linear(lora_rank, heads * self.head_dim, bias=False)
-        self.out_proj = nn.Linear(dim, dim, bias=False)
+        self.q_nope = nn.Linear(self.dim, self.heads * self.nope_dim, bias=False)
+        self.q_rope = nn.Linear(self.dim, self.heads * self.rope_dim, bias=False)
+        self.kv_down = nn.Linear(self.dim, self.kv_lora_rank, bias=False)
+        self.kv_norm_w = nn.Parameter(torch.ones(self.kv_lora_rank))
+        self.kv_up_k_nope = nn.Linear(self.kv_lora_rank, self.heads * self.nope_dim, bias=False)
+        self.k_rope = nn.Linear(self.dim, self.rope_dim, bias=False)
+        self.kv_up_v = nn.Linear(self.kv_lora_rank, self.heads * self.head_dim, bias=False)
+        self.out_proj = nn.Linear(self.dim, self.dim, bias=False)
 
-        inv_freq = 1.0 / (10000.0 ** (torch.arange(0, rope_dim, 2).float() / rope_dim))
-        t = torch.arange(max_seq_len)
+        inv_freq = 1.0 / (cfg.rope_theta ** (torch.arange(0, self.rope_dim, 2).float() / self.rope_dim))
+        t = torch.arange(self.max_seq_len)
         freqs = torch.outer(t, inv_freq)
         emb = torch.cat([freqs, freqs], dim=-1)
         self.register_buffer("cos_cache", emb.cos()[None, :, None, :], persistent=False)
@@ -63,12 +61,12 @@ class MultiHeadLatentAttention(nn.Module):
         return x * cos + self._rotate_half(x) * sin
 
     def build_absorbed_weights(self):
-        H, Dn, Dh, R = self.heads, self.nope_dim, self.head_dim, self.lora_rank
+        H, Dn, Dh, R = self.heads, self.nope_dim, self.head_dim, self.kv_lora_rank
         self._wuk = self.kv_up_k_nope.weight.detach().view(H, Dn, R).contiguous()
         self._wuv = self.kv_up_v.weight.detach().view(H, Dh, R).contiguous()
 
     def init_cache(self, batch_size: int, device, dtype):
-        latent_cache = torch.zeros(batch_size, self.max_seq_len, self.lora_rank, device=device, dtype=dtype)
+        latent_cache = torch.zeros(batch_size, self.max_seq_len, self.kv_lora_rank, device=device, dtype=dtype)
         rope_cache = torch.zeros(batch_size, self.max_seq_len, self.rope_dim, device=device, dtype=dtype)
         return latent_cache, rope_cache
 
@@ -90,7 +88,7 @@ class MultiHeadLatentAttention(nn.Module):
         q_full = torch.cat([q_nope, q_rope], dim=-1)
 
         latent = self.kv_down(x)
-        latent = F.rms_norm(latent, (self.lora_rank,), self.kv_norm_w, 1e-6)
+        latent = F.rms_norm(latent, (self.kv_lora_rank,), self.kv_norm_w, 1e-6)
 
         k_rope = self.k_rope(x).view(B, T, 1, Dr)
         k_rope = self._apply_rope(k_rope, cos, sin).expand(-1, -1, H, -1)
@@ -114,7 +112,7 @@ class MultiHeadLatentAttention(nn.Module):
             self.build_absorbed_weights()
 
         B, T, C = x.shape
-        H, Dr, Dn, R, S = self.heads, self.rope_dim, self.nope_dim, self.lora_rank, self.max_seq_len
+        H, Dr, Dn, R = self.heads, self.rope_dim, self.nope_dim, self.kv_lora_rank
         latent_cache, rope_cache = kv_cache
 
         q_nope = self.q_nope(x).view(B, T, H, Dn)
@@ -130,29 +128,39 @@ class MultiHeadLatentAttention(nn.Module):
         latent_new = F.rms_norm(latent_new, (R,), self.kv_norm_w, 1e-6)
         k_rope_new = self._apply_rope(self.k_rope(x).view(B, T, 1, Dr), cos, sin).squeeze(2)
 
-        pos = torch.arange(offset, offset + T, device=x.device)
-        latent_cache.index_copy_(1, pos, latent_new)
-        rope_cache.index_copy_(1, pos, k_rope_new)
+        latent_cache[:, offset : offset + T, :] = latent_new
+        rope_cache[:, offset : offset + T, :] = k_rope_new
 
-        scores_nope = torch.einsum("bthr,bsr->bhts", q_absorbed, latent_cache)
-        scores_rope = torch.einsum("bthd,bsd->bhts", q_rope, rope_cache)
+        curr_seq_len = offset + T
+        active_latent = latent_cache[:, :curr_seq_len, :]
+        active_rope = rope_cache[:, :curr_seq_len, :]
+
+        scores_nope = torch.einsum("bthr,bsr->bhts", q_absorbed, active_latent)
+        scores_rope = torch.einsum("bthd,bsd->bhts", q_rope, active_rope)
         scores = (scores_nope + scores_rope) * self.scale
 
-        key_pos = torch.arange(S, device=x.device)
-        causal_mask = key_pos[None, :] > pos[:, None]
-        scores = scores.masked_fill(causal_mask[None, None], float("-inf"))
+        if T > 1:
+            pos = torch.arange(offset, offset + T, device=x.device)
+            key_pos = torch.arange(curr_seq_len, device=x.device)
+            causal_mask = key_pos[None, :] > pos[:, None]
+            min_val = torch.finfo(scores.dtype).min
+            scores = scores.masked_fill(causal_mask[None, None], min_val)
 
         attn = torch.softmax(scores.float(), dim=-1).to(x.dtype)
-        al = torch.einsum("bhts,bsr->bhtr", attn, latent_cache)
+        al = torch.einsum("bhts,bsr->bhtr", attn, active_latent)
         out = torch.einsum("bhtr,hdr->bthd", al, self._wuv).reshape(B, T, C)
 
         return self.out_proj(out), (latent_cache, rope_cache)
 
 
 class FeedForward(nn.Module):
-    def __init__(self, dim: int, dropout: float = 0.1):
+    def __init__(self, dim: int, hidden: int | None = None, dropout: float = 0.1):
         super().__init__()
-        hidden = int(8 * dim / 3 + 127) // 128 * 128
+        if hidden is None:
+            hidden = ((8 * dim // 3 + 127) // 128) * 128
+        elif hidden <= dim:
+            raise ValueError("hidden must be greater than dim")
+
         self.w13 = nn.Linear(dim, 2 * hidden, bias=False)
         self.w2 = nn.Linear(hidden, dim, bias=False)
         self.drop = nn.Dropout(dropout)
@@ -163,12 +171,12 @@ class FeedForward(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, dim: int, heads: int, lora_rank: int, max_seq_len: int, dropout: float = 0.1, rope_dim: int = 64):
+    def __init__(self, cfg: Type[Config]):
         super().__init__()
-        self.ln1 = nn.RMSNorm(dim)
-        self.attn = MultiHeadLatentAttention(dim, heads, max_seq_len=max_seq_len, lora_rank=lora_rank, rope_dim=rope_dim)
-        self.ln2 = nn.RMSNorm(dim)
-        self.ff = FeedForward(dim, dropout)
+        self.ln1 = nn.RMSNorm(cfg.dim)
+        self.attn = MultiHeadLatentAttention(cfg)
+        self.ln2 = nn.RMSNorm(cfg.dim)
+        self.ff = FeedForward(cfg.dim, cfg.ffn_dim, cfg.dropout)
 
     def forward(
         self,

@@ -4,32 +4,25 @@ from torch import nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
+from evolix.config.config import Config
 from evolix.models.layers import Block
 
 
 class Evolix(nn.Module):
     def __init__(
         self,
-        vocab_size: int,
-        dim: int = 1536,
-        lora_rank: int = 512,
-        layers: int = 32,
-        heads: int = 12,
-        block_size: int = 2048,
-        dropout: float = 0.1,
-        grad_checkpoint: bool = False,
-        rope_dim: int = 64,
+        cfg: Config,
     ):
         super().__init__()
-        self.use_gc = grad_checkpoint
+        self.use_gc = cfg.grad_checkpoint
 
-        self.dim = dim
-        self.embedding = nn.Embedding(vocab_size, dim)
-        self.drop = nn.Dropout(dropout)
-        self.blocks = nn.ModuleList([Block(dim, heads, lora_rank, block_size, dropout, rope_dim) for _ in range(layers)])
-        self.ln_f = nn.RMSNorm(dim)
-        self.lm_head = nn.Linear(dim, vocab_size, bias=False)
-        self._init_weights_all(layers)
+        self.dim = cfg.dim
+        self.embedding = nn.Embedding(cfg.vocab_size, self.dim)
+        self.drop = nn.Dropout(cfg.dropout)
+        self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.layers)])
+        self.ln_f = nn.RMSNorm(self.dim)
+        self.lm_head = nn.Linear(self.dim, cfg.vocab_size, bias=False)
+        self._init_weights_all(cfg.layers)
         self.lm_head.weight = self.embedding.weight
 
     def _init_weights_all(self, layers: int):
@@ -63,7 +56,7 @@ class Evolix(nn.Module):
 
         for i, block in enumerate(self.blocks):
             if self.use_gc and self.training:
-                h = checkpoint(block.forward, h, offset, None, use_reentrant=False)[0]
+                h = checkpoint(block, h, offset, None, use_reentrant=False)[0]
             else:
                 past_cache = kv_caches[i] if (kv_caches is not None) else None
 

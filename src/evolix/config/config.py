@@ -9,10 +9,12 @@ class Config:
     spm_prefix: str = "evolix"
     block_size: int = 8192
     layers: int = 24
-    heads: int = 22
-    dim: int = 2816
-    lora_rank: int = 512
+    heads: int = 20
+    dim: int = 2560
+    ffn_dim: int = 7680
+    kv_lora_rank: int = 512
     rope_dim: int = 64
+    rope_theta: float = 12800.0
     dropout: float = 0.0
     bias: bool = False
     grad_checkpoint: bool = False
@@ -20,7 +22,7 @@ class Config:
     # --- DATA & TRAINING SYSTEM ---
     data_split: str = "train"
     batch_size: int = 2
-    grad_accum: int = 16
+    grad_accum: int = 32
     dtype: str = "bfloat16"
     num_workers: int = 8
     prefetch_factor: int = 4

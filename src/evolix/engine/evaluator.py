@@ -17,8 +17,8 @@ class Evaluator(EngineBase):
     @torch.no_grad()
     def run(self, max_batches: Optional[int] = None) -> dict:
         device, ddp, _, master_process, _ = self.setup()
-        model_dtype = torch.bfloat16 if self.config.dtype == "bfloat16" else torch.float32
-        amp_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}.get(self.config.dtype, torch.float32)
+        model_dtype = torch.bfloat16 if self.cfg.dtype == "bfloat16" else torch.float32
+        amp_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}.get(self.cfg.dtype, torch.float32)
 
         model = self.build_model().to(device, dtype=model_dtype)
         self.checkpoint_manager.load(model=model, optimizer=None, scaler=None)
