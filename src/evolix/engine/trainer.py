@@ -1,7 +1,6 @@
 from typing import Type
 import torch
 import torch.distributed as dist
-import bitsandbytes as bnb
 
 from evolix.config import Config
 from evolix.engine.base import EngineBase
@@ -94,9 +93,8 @@ class Trainer(EngineBase):
                     x, y = next(data_iter)
 
                 x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-                with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=is_cuda):
-                    loss = model(x, y)
-                    scaled_loss = loss / self.cfg.grad_accum
+                loss = model(x, y)
+                scaled_loss = loss / self.cfg.grad_accum
 
                 if scaler.is_enabled():
                     scaler.scale(scaled_loss).backward()

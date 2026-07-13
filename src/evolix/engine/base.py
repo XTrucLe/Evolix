@@ -47,7 +47,7 @@ class EngineBase:
 
         if hasattr(torch.backends.cuda, "enable_cudnn_sdp"):
             if SM >= 90:
-                torch.backends.cuda.enable_flash_sdp(True)
+                torch.backends.cuda.enable_flash_sdp(False)
                 torch.backends.cuda.enable_cudnn_sdp(True)
                 torch.backends.cuda.enable_mem_efficient_sdp(False)
             else:

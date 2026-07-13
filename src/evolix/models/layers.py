@@ -104,7 +104,7 @@ class MultiHeadLatentAttention(nn.Module):
         with sdpa_kernel(backends=BACKENDS):
             out = F.scaled_dot_product_attention(q_attn, k_attn, v_attn, is_causal=True, dropout_p=0.0, scale=self.scale)
 
-        out = out.transpose(1, 2).reshape(B, T, C).to(x.dtype)
+        out = out.transpose(1, 2).reshape(B, T, C)
         return self.out_proj(out), None
 
     def _forward_decode(self, x, offset: int, kv_cache: Tuple[torch.Tensor, torch.Tensor]):

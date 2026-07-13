@@ -23,7 +23,6 @@ class Evolix(nn.Module):
         self.ln_f = nn.RMSNorm(self.dim)
         self.lm_head = nn.Linear(self.dim, cfg.vocab_size, bias=False)
         self._init_weights_all(cfg.layers)
-        self.lm_head.weight = self.embedding.weight
 
     def _init_weights_all(self, layers: int):
         self.apply(self._init_module)
@@ -50,7 +49,6 @@ class Evolix(nn.Module):
         B, T = x.shape
 
         h = self.drop(self.embedding(x))
-
         use_cache = kv_caches is not None or (y is None and not self.training)
         new_kv_caches = [] if use_cache else None
 
@@ -59,19 +57,15 @@ class Evolix(nn.Module):
                 h = checkpoint(block, h, offset, None, use_reentrant=False)[0]
             else:
                 past_cache = kv_caches[i] if (kv_caches is not None) else None
-
                 h, new_cache = block(h, offset=offset, kv_cache=past_cache)
-
                 if use_cache:
                     new_kv_caches.append(new_cache)
 
         logits = self.lm_head(self.ln_f(h))
-
         if y is None:
             return logits, new_kv_caches
 
         assert y.shape == (B, T)
-
         return F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1), ignore_index=-1)
 
     def num_params(self) -> str:

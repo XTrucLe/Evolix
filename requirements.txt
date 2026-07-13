@@ -5,6 +5,5 @@ fsspec
 huggingface_hub
 numpy
 safetensors
-sentencepiece
 torch
 transformers
