@@ -1,20 +1,20 @@
-import os
 import json
+import os
+from typing import Type
+
 import torch
-from safetensors.torch import save_file, load_file
-from huggingface_hub.utils import logging, disable_progress_bars
-from evolix.utils.serialization import get_raw_model
-from evolix.utils.serialization import to_cpu
+from huggingface_hub.utils import disable_progress_bars, logging
+from safetensors.torch import load_file, save_file
 
 from evolix.config.config import Config
-from typing import Type
+from evolix.utils.serialization import get_raw_model, to_cpu
 
 logging.set_verbosity_error()
 disable_progress_bars()
 
 
 class CheckpointManager:
-    def __init__(self, cfg: Type[Config]):
+    def __init__(self, cfg: Config):
         self.cfg = cfg
         self.repo_id = self.cfg.hf_repo_id
         self.token = self.cfg.hf_token
@@ -27,10 +27,6 @@ class CheckpointManager:
         from huggingface_hub import HfApi
 
         self.api = HfApi()
-        try:
-            self.api.create_repo(repo_id=self.repo_id, token=self.token, exist_ok=True, private=True)
-        except Exception as e:
-            print(f"[hf_ckpt] Warning when creating repo: {e}")
 
     def save(self, model, optimizer, scaler, step, loss, ddp_world_size=1):
         raw_model = get_raw_model(model)
@@ -41,13 +37,19 @@ class CheckpointManager:
         cpu_clean_state = {k: v.contiguous() for k, v in cpu_clean_state.items()}
 
         config_data = {
-            "architectures": [raw_model.__class__.__name__],
+            "architectures": ["EvolixForCausalLM"],
+            "model_type": "evolix",
             "vocab_size": self.cfg.vocab_size,
             "hidden_size": self.cfg.dim,
+            "intermediate_size": self.cfg.ffn_dim,
             "num_hidden_layers": self.cfg.layers,
             "num_attention_heads": self.cfg.heads,
             "max_position_embeddings": self.cfg.block_size,
+            "kv_lora_rank": self.cfg.kv_lora_rank,
+            "rope_dim": self.cfg.rope_dim,
+            "rope_theta": self.cfg.rope_theta,
             "torch_dtype": self.cfg.dtype,
+            "tie_word_embeddings": False,
         }
         config_path = os.path.join(self.local_temp_dir, "config.json")
         with open(config_path, "w", encoding="utf-8") as f:
@@ -81,23 +83,20 @@ class CheckpointManager:
                 folder_path=self.local_temp_dir,
                 repo_id=self.repo_id,
                 token=self.token,
-                commit_message=f"Automated backup - Step {step}",
-                run_as_future=True,
+                commit_message=f"Checkpoint at step {step}",
             )
-            print("[HF Backup] Upload task spawned successfully in background.")
-        except Exception as e:
-            print(f"❌ [HF Backup] Failed to trigger upload: {e}")
+            print("✅ Checkpoint uploaded to Hugging Face Hub successfully.")
+        except Exception:
+            print("❌ Failed to upload checkpoint to Hugging Face Hub.")
 
     def load(self, model, optimizer=None, scaler=None, dataset=None, ddp_world_size=1) -> int:
         from huggingface_hub import hf_hub_download
 
-        print(f"[hf_ckpt] Checking for the latest checkpoint on Hugging Face Hub ({self.repo_id})...")
-
         try:
             safetensors_path = hf_hub_download(repo_id=self.repo_id, filename="model.safetensors", token=self.token)
             training_state_path = hf_hub_download(repo_id=self.repo_id, filename="training_state.pt", token=self.token)
-        except Exception as e:
-            print(f"[hf_ckpt] No valid checkpoint found on the Hub. Starting training from scratch (Step 0). Details: {e}")
+        except Exception:
+            print("❌ No checkpoint found on Hugging Face Hub. Starting from scratch.")
             return 0
 
         state = load_file(safetensors_path, device="cpu")
@@ -123,5 +122,5 @@ class CheckpointManager:
 
         rescaled_step = samples_trained // (self.cfg.batch_size * self.cfg.grad_accum * ddp_world_size)
 
-        print(f"[hf_ckpt] Successfully loaded checkpoint from Hugging Face Hub at step {rescaled_step}")
+        print("✅ Checkpoint loaded successfully.")
         return rescaled_step

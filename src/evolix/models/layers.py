@@ -1,8 +1,8 @@
+from typing import Optional, Tuple, Type
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple, Type
-
 from torch.nn.attention import sdpa_kernel, SDPBackend
 
 from evolix.config.config import Config
@@ -26,14 +26,15 @@ class MultiHeadLatentAttention(nn.Module):
         self.kv_lora_rank = cfg.kv_lora_rank
         self.max_seq_len = cfg.block_size
         self.scale = self.head_dim**-0.5
+        self.epsilon = cfg.epsilon
 
-        self.q_nope = nn.Linear(self.dim, self.heads * self.nope_dim, bias=False)
-        self.q_rope = nn.Linear(self.dim, self.heads * self.rope_dim, bias=False)
+        self.q_proj = nn.Linear(self.dim, self.heads * self.head_dim, bias=False)
+
         self.kv_down = nn.Linear(self.dim, self.kv_lora_rank, bias=False)
         self.kv_norm_w = nn.Parameter(torch.ones(self.kv_lora_rank))
-        self.kv_up_k_nope = nn.Linear(self.kv_lora_rank, self.heads * self.nope_dim, bias=False)
+        self.kv_up_proj = nn.Linear(self.kv_lora_rank, self.heads * (self.nope_dim + self.head_dim), bias=False)
         self.k_rope = nn.Linear(self.dim, self.rope_dim, bias=False)
-        self.kv_up_v = nn.Linear(self.kv_lora_rank, self.heads * self.head_dim, bias=False)
+
         self.out_proj = nn.Linear(self.dim, self.dim, bias=False)
 
         inv_freq = 1.0 / (cfg.rope_theta ** (torch.arange(0, self.rope_dim, 2).float() / self.rope_dim))
@@ -43,13 +44,22 @@ class MultiHeadLatentAttention(nn.Module):
         self.register_buffer("cos_cache", emb.cos()[None, :, None, :], persistent=False)
         self.register_buffer("sin_cache", emb.sin()[None, :, None, :], persistent=False)
 
-        self.register_buffer("_wuk", None, persistent=False)
-        self.register_buffer("_wuv", None, persistent=False)
+        self._wuk: Optional[torch.Tensor] = None
+        self._wuv: Optional[torch.Tensor] = None
+
+        self._absorbed_weight_version = -1
+        self._weight_version = 0
+
+    def _bump_weight_version(self):
+        self._weight_version += 1
+
+    def _load_from_state_dict(self, *args, **kwargs):
+        super()._load_from_state_dict(*args, **kwargs)
+        self._bump_weight_version()
 
     def train(self, mode: bool = True):
         if mode:
-            self._wuk = None
-            self._wuv = None
+            self._bump_weight_version()
         return super().train(mode)
 
     @staticmethod
@@ -62,8 +72,14 @@ class MultiHeadLatentAttention(nn.Module):
 
     def build_absorbed_weights(self):
         H, Dn, Dh, R = self.heads, self.nope_dim, self.head_dim, self.kv_lora_rank
-        self._wuk = self.kv_up_k_nope.weight.detach().view(H, Dn, R).contiguous()
-        self._wuv = self.kv_up_v.weight.detach().view(H, Dh, R).contiguous()
+        w = self.kv_up_proj.weight.detach().view(H, Dn + Dh, R)
+        self._wuk = w[:, :Dn, :].contiguous()
+        self._wuv = w[:, Dn:, :].contiguous()
+        self._absorbed_weight_version = self._weight_version
+
+    def _ensure_absorbed_weights_fresh(self):
+        if self._wuk is None or self._absorbed_weight_version != self._weight_version:
+            self.build_absorbed_weights()
 
     def init_cache(self, batch_size: int, device, dtype):
         latent_cache = torch.zeros(batch_size, self.max_seq_len, self.kv_lora_rank, device=device, dtype=dtype)
@@ -79,8 +95,7 @@ class MultiHeadLatentAttention(nn.Module):
         B, T, C = x.shape
         H, Dr, Dn = self.heads, self.rope_dim, self.nope_dim
 
-        q_nope = self.q_nope(x).view(B, T, H, Dn)
-        q_rope = self.q_rope(x).view(B, T, H, Dr)
+        q_nope, q_rope = self.q_proj(x).view(B, T, H, Dn + Dr).split([Dn, Dr], dim=-1)
 
         cos = self.cos_cache[:, offset : offset + T]
         sin = self.sin_cache[:, offset : offset + T]
@@ -88,13 +103,12 @@ class MultiHeadLatentAttention(nn.Module):
         q_full = torch.cat([q_nope, q_rope], dim=-1)
 
         latent = self.kv_down(x)
-        latent = F.rms_norm(latent, (self.kv_lora_rank,), self.kv_norm_w, 1e-6)
+        latent = F.rms_norm(latent, (self.kv_lora_rank,), self.kv_norm_w, self.epsilon)
 
         k_rope = self.k_rope(x).view(B, T, 1, Dr)
         k_rope = self._apply_rope(k_rope, cos, sin).expand(-1, -1, H, -1)
 
-        k_nope = self.kv_up_k_nope(latent).view(B, T, H, Dn)
-        v = self.kv_up_v(latent).view(B, T, H, self.head_dim)
+        k_nope, v = self.kv_up_proj(latent).view(B, T, H, Dn + self.head_dim).split([Dn, self.head_dim], dim=-1)
         k_full = torch.cat([k_nope, k_rope], dim=-1)
 
         q_attn = q_full.permute(0, 2, 1, 3)
@@ -108,15 +122,16 @@ class MultiHeadLatentAttention(nn.Module):
         return self.out_proj(out), None
 
     def _forward_decode(self, x, offset: int, kv_cache: Tuple[torch.Tensor, torch.Tensor]):
-        if self._wuk is None:
-            self.build_absorbed_weights()
+        self._ensure_absorbed_weights_fresh()
 
         B, T, C = x.shape
         H, Dr, Dn, R = self.heads, self.rope_dim, self.nope_dim, self.kv_lora_rank
         latent_cache, rope_cache = kv_cache
 
-        q_nope = self.q_nope(x).view(B, T, H, Dn)
-        q_rope = self.q_rope(x).view(B, T, H, Dr)
+        if offset + T > self.max_seq_len:
+            raise ValueError(f"offset+T={offset + T} exceeds max_seq_len={self.max_seq_len}.")
+
+        q_nope, q_rope = self.q_proj(x).view(B, T, H, Dn + Dr).split([Dn, Dr], dim=-1)
 
         cos = self.cos_cache[:, offset : offset + T]
         sin = self.sin_cache[:, offset : offset + T]
@@ -125,7 +140,7 @@ class MultiHeadLatentAttention(nn.Module):
         q_absorbed = torch.einsum("bthd,hdr->bthr", q_nope, self._wuk)
 
         latent_new = self.kv_down(x)
-        latent_new = F.rms_norm(latent_new, (R,), self.kv_norm_w, 1e-6)
+        latent_new = F.rms_norm(latent_new, (R,), self.kv_norm_w, self.epsilon)
         k_rope_new = self._apply_rope(self.k_rope(x).view(B, T, 1, Dr), cos, sin).squeeze(2)
 
         latent_cache[:, offset : offset + T, :] = latent_new
@@ -186,6 +201,5 @@ class Block(nn.Module):
     ):
         attn_out, new_cache = self.attn(self.ln1(x), offset=offset, kv_cache=kv_cache)
         x = x + attn_out
-        ff_out = self.ff(self.ln2(x))
-        out = x + ff_out
-        return out, new_cache
+        x = x + self.ff(self.ln2(x))
+        return x, new_cache

@@ -1,22 +1,21 @@
 from typing import List
-import sentencepiece as spm
+from tokenizers import Tokenizer as BPE_Tokenizer
 
 
 class Tokenizer:
     def __init__(self, model_path: str):
-        self.sp = spm.SentencePieceProcessor()
-        self.sp.load(model_path)
-        self.pad_id = self.sp.pad_id() if self.sp.pad_id() >= 0 else 0
-        self.eos_id = self.sp.eos_id() if self.sp.eos_id() >= 0 else self.sp.vocab_size() - 1
+        self.tokenizer = BPE_Tokenizer.from_file(model_path)
+        self.pad_id = self.tokenizer.token_to_id("<pad>") if self.tokenizer.token_to_id("<pad>") is not None else 0
+        self.eos_id = self.tokenizer.token_to_id("</s>") if self.tokenizer.token_to_id("</s>") is not None else 3
 
     def encode(self, text: str, add_eos: bool = False) -> List[int]:
-        ids = self.sp.encode(text, out_type=int)
+        ids = self.tokenizer.encode(text, add_special_tokens=False).ids
         return ids + [self.eos_id] if add_eos else ids
 
     def decode(self, ids: List[int]) -> str:
         ids = [i for i in ids if i != self.pad_id]
-        return self.sp.decode(ids)
+        return self.tokenizer.decode(ids, skip_special_tokens=False)
 
     @property
     def vocab_size(self) -> int:
-        return self.sp.vocab_size()
+        return self.tokenizer.vocab_size

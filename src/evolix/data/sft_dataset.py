@@ -6,7 +6,7 @@ from torch.utils.data import Dataset, DataLoader
 from evolix.data.tokenizer import Tokenizer
 from evolix.config.finetune_config import FinetuneConfig
 
-IGNORE_INDEX = -1
+IGNORE_INDEX = -100
 
 
 class SFTDataset(Dataset):
@@ -42,7 +42,6 @@ class SFTDataset(Dataset):
 
 
 class SFTDataManager:
-
     def __init__(self, cfg: Type[FinetuneConfig], tokenizer: Tokenizer):
         self.cfg = cfg
         self.tokenizer = tokenizer

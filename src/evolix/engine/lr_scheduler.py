@@ -1,7 +1,9 @@
 import math
 
+from evolix.config.config import Config
 
-def get_lr(step: int, cfg):
+
+def get_lr(step: int, cfg: Config):
     w, t = cfg.warmup_steps, max(cfg.total_steps, cfg.warmup_steps + 1)
     base, min_lr = cfg.lr, cfg.min_lr
 

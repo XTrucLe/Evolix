@@ -47,7 +47,7 @@ class EngineBase:
 
         if hasattr(torch.backends.cuda, "enable_cudnn_sdp"):
             if SM >= 90:
-                torch.backends.cuda.enable_flash_sdp(False)
+                torch.backends.cuda.enable_flash_sdp(True)
                 torch.backends.cuda.enable_cudnn_sdp(True)
                 torch.backends.cuda.enable_mem_efficient_sdp(False)
             else:
@@ -67,5 +67,6 @@ class EngineBase:
     def maybe_compile(self, model: Evolix):
         if self.cfg.compile and hasattr(torch, "compile"):
             torch._inductor.config.coordinate_descent_tuning = True
-            model = torch.compile(model, mode="max-autotune")
+            torch._inductor.config.triton.unique_kernel_names = True
+            model = torch.compile(model, mode="reduce-overhead", fullgraph=True, dynamic=False)
         return model
