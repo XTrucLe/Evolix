@@ -28,12 +28,11 @@ class MultiHeadLatentAttention(nn.Module):
         self.scale = self.head_dim**-0.5
         self.epsilon = cfg.epsilon
 
-        self.q_proj = nn.Linear(self.dim, self.heads * self.head_dim, bias=False)
+        self.q_proj = nn.Linear(self.dim, self.heads * (self.nope_dim + self.rope_dim), bias=False)
 
-        self.kv_down = nn.Linear(self.dim, self.kv_lora_rank, bias=False)
+        self.kv_down = nn.Linear(self.dim, self.kv_lora_rank + self.rope_dim, bias=False)
         self.kv_norm_w = nn.Parameter(torch.ones(self.kv_lora_rank))
         self.kv_up_proj = nn.Linear(self.kv_lora_rank, self.heads * (self.nope_dim + self.head_dim), bias=False)
-        self.k_rope = nn.Linear(self.dim, self.rope_dim, bias=False)
 
         self.out_proj = nn.Linear(self.dim, self.dim, bias=False)
 
@@ -93,7 +92,7 @@ class MultiHeadLatentAttention(nn.Module):
 
     def _forward_train(self, x, offset):
         B, T, C = x.shape
-        H, Dr, Dn = self.heads, self.rope_dim, self.nope_dim
+        H, Dr, Dn, R = self.heads, self.rope_dim, self.nope_dim, self.kv_lora_rank
 
         q_nope, q_rope = self.q_proj(x).view(B, T, H, Dn + Dr).split([Dn, Dr], dim=-1)
 
@@ -102,11 +101,10 @@ class MultiHeadLatentAttention(nn.Module):
         q_rope = self._apply_rope(q_rope, cos, sin)
         q_full = torch.cat([q_nope, q_rope], dim=-1)
 
-        latent = self.kv_down(x)
-        latent = F.rms_norm(latent, (self.kv_lora_rank,), self.kv_norm_w, self.epsilon)
+        latent, k_rope = self.kv_down(x).split([R, Dr], dim=-1)
+        latent = F.rms_norm(latent, (R,), self.kv_norm_w, self.epsilon)
 
-        k_rope = self.k_rope(x).view(B, T, 1, Dr)
-        k_rope = self._apply_rope(k_rope, cos, sin).expand(-1, -1, H, -1)
+        k_rope = self._apply_rope(k_rope.view(B, T, 1, Dr), cos, sin).expand(-1, -1, H, -1)
 
         k_nope, v = self.kv_up_proj(latent).view(B, T, H, Dn + self.head_dim).split([Dn, self.head_dim], dim=-1)
         k_full = torch.cat([k_nope, k_rope], dim=-1)
@@ -139,9 +137,9 @@ class MultiHeadLatentAttention(nn.Module):
 
         q_absorbed = torch.einsum("bthd,hdr->bthr", q_nope, self._wuk)
 
-        latent_new = self.kv_down(x)
+        latent_new, k_rope_new = self.kv_down(x).split([R, Dr], dim=-1)
         latent_new = F.rms_norm(latent_new, (R,), self.kv_norm_w, self.epsilon)
-        k_rope_new = self._apply_rope(self.k_rope(x).view(B, T, 1, Dr), cos, sin).squeeze(2)
+        k_rope_new = self._apply_rope(k_rope_new.view(B, T, 1, Dr), cos, sin).squeeze(2)
 
         latent_cache[:, offset : offset + T, :] = latent_new
         rope_cache[:, offset : offset + T, :] = k_rope_new
@@ -176,22 +174,22 @@ class FeedForward(nn.Module):
         elif hidden <= dim:
             raise ValueError("hidden must be greater than dim")
 
-        self.w13 = nn.Linear(dim, 2 * hidden, bias=False)
-        self.w2 = nn.Linear(hidden, dim, bias=False)
+        self.gate_proj = nn.Linear(dim, hidden, bias=False)
+        self.up_proj = nn.Linear(dim, hidden, bias=False)
+        self.down_proj = nn.Linear(hidden, dim, bias=False)
         self.drop = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate, up = self.w13(x).chunk(2, dim=-1)
-        return self.drop(self.w2(F.silu(gate) * up))
+        return self.drop(self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x)))
 
 
 class Block(nn.Module):
     def __init__(self, cfg: Type[Config]):
         super().__init__()
-        self.ln1 = nn.RMSNorm(cfg.dim)
-        self.attn = MultiHeadLatentAttention(cfg)
-        self.ln2 = nn.RMSNorm(cfg.dim)
-        self.ff = FeedForward(cfg.dim, cfg.ffn_dim, cfg.dropout)
+        self.input_layernorm = nn.RMSNorm(cfg.dim)
+        self.self_attn = MultiHeadLatentAttention(cfg)
+        self.post_attention_layernorm = nn.RMSNorm(cfg.dim)
+        self.mlp = FeedForward(cfg.dim, cfg.ffn_dim, cfg.dropout)
 
     def forward(
         self,
@@ -199,7 +197,7 @@ class Block(nn.Module):
         offset: int = 0,
         kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):
-        attn_out, new_cache = self.attn(self.ln1(x), offset=offset, kv_cache=kv_cache)
+        attn_out, new_cache = self.self_attn(self.input_layernorm(x), offset=offset, kv_cache=kv_cache)
         x = x + attn_out
-        x = x + self.ff(self.ln2(x))
+        x = x + self.mlp(self.post_attention_layernorm(x))
         return x, new_cache
