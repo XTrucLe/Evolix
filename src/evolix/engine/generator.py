@@ -42,7 +42,7 @@ class Generator(EngineBase):
         ids = self.tokenizer.encode(prompt)
         x = torch.tensor([ids], dtype=torch.long, device=device)
 
-        kv_caches = [block.attn.init_cache(1, device, model_dtype) for block in self._model.blocks]
+        kv_caches = [block.self_attn.init_cache(1, device, model_dtype) for block in self._model.blocks]
 
         logits, kv_caches = self._model(x, kv_caches=kv_caches, offset=0)
         next_id = sample_next(logits[:, -1], temperature, top_k, top_p)

@@ -23,7 +23,7 @@ class Evolix(nn.Module):
     def _init_weights_all(self, layers):
         self.apply(self._init_module)
         for name, p in self.named_parameters():
-            if name.endswith("proj.weight") or name.endswith("w2.weight"):
+            if name.endswith("proj.weight"):
                 nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * layers))
 
     @staticmethod
